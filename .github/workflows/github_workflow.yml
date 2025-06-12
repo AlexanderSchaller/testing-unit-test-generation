@@ -1,40 +1,106 @@
-  const fs = require('fs');
-    const path = require('path');
-    const { execSync } = require('child_process');
-    const glob = require('glob');
-    
-    class CodeAnalyzer {
-    constructor() {
-    this.tsParser = require('@typescript-eslint/parser');
-    this.getParamName = this.getParamName.bind(this);
-    }
-    
-    getChangedFiles() {
-    try {
-  const output = execSync('git diff --name-only HEAD~1 HEAD', { encoding: 'utf8' });
-    return output.split('\n').filter(file =>
-    file && (file.endsWith('.ts') || file.endsWith('.js') || file.endsWith('.vue'))
-    );
-  } catch (error) {
-    console.log('Could not get changed files, analyzing all source files');
-    return glob.sync('src/**/*.{ts,js}');
-  }
-  }
+name: Auto-generate Unit Tests
 
-    extractFunctions(filePath) {
-    try {
-    const content = fs.readFileSync(filePath, 'utf8');
-    const ast = this.tsParser.parse(content, {
-  ecmaVersion: 2020,
-  sourceType: 'module',
-  ecmaFeatures: { jsx: true },
-  loc: true
-  });
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - '**/*.ts'
+      - '**/*.js'
+      - '**/*.vue'
+
+jobs:
+  generate-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     
-    const functions = [];
-    
-    const traverse = (node, parent = null) => {
-    if (node.type === 'FunctionDeclaration' && node.id) {
-    functions.push({
-  name: node.id.name,
-  type:
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npm install -g @typescript-eslint/parser @babel/parser
+
+      - name: Install test generator dependencies
+        run: |
+          npm install --no-save typescript @typescript-eslint/parser glob openai
+
+      - name: Generate missing tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          node .github/scripts/generate-tests.js
+
+      - name: Check for generated tests
+        id: check_tests
+        run: |
+          if git diff --quiet; then
+            echo "generated=false" >> $GITHUB_OUTPUT
+          else
+            echo "generated=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create test suggestions directory
+        if: steps.check_tests.outputs.generated == 'true'
+        run: |
+          mkdir -p .github/test-suggestions
+          git add . && git stash push -m "Generated tests"
+
+      - name: Comment on PR with test suggestions
+        if: steps.check_tests.outputs.generated == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            
+            // Get the stashed changes
+            const diffOutput = execSync('git stash show -p', { encoding: 'utf8' });
+            
+            // Create a collapsible comment with the generated tests
+            const body = `🤖 **Unit Tests Generated** 
+            
+            I've detected functions that are missing unit tests and generated comprehensive test suites for them.
+            
+            **Options:**
+            - React with 👍 and comment "approve tests" to automatically commit these tests
+            - React with 👎 if you don't want these tests
+            - Comment with specific feedback for modifications
+            
+            <details>
+            <summary>📋 View Generated Tests (Click to expand)</summary>
+            
+            \`\`\`diff
+            ${diffOutput}
+            \`\`\`
+            
+            </details>
+            
+            **Functions with generated tests:**
+            ${process.env.GENERATED_FUNCTIONS || 'Check the diff above for details'}
+            
+            ---
+            *To apply these tests, comment "approve tests" or react with 👍*
+            *To regenerate with different requirements, comment "regenerate tests with [your requirements]"*`;
+            
+            const comment = await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+            
+            // Store comment ID for later use
+            console.log(`Comment created with ID: ${comment.data.id}`);
