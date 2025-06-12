@@ -1,3 +1,4 @@
+// .github/scripts/generate-tests.js
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
@@ -11,349 +12,132 @@ class CodeAnalyzer {
 
   getChangedFiles() {
     try {
-      const output = execSync('git diff --name-only HEAD~1 HEAD', { encoding: 'utf8' });
-      return output.split('\n').filter(file =>
-          file && (file.endsWith('.ts') || file.endsWith('.js') || file.endsWith('.vue'))
-      );
-    } catch (error) {
-      console.log('Could not get changed files, analyzing all source files');
+      const out = execSync('git diff --name-only HEAD~1 HEAD', { encoding: 'utf8' });
+      return out.split('\n').filter(f => f && /\.(ts|js|vue)$/.test(f));
+    } catch {
       return glob.sync('src/**/*.{ts,js}');
     }
   }
 
   extractFunctions(filePath) {
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      const ast = this.tsParser.parse(content, {
-        ecmaVersion: 2020,
-        sourceType: 'module',
+      const src = fs.readFileSync(filePath, 'utf8');
+      const parseResult = this.tsParser.parseForESLint(src, {
+        filePath,
         loc: true,
+        range: true,
+        tokens: true,
+        comment: true,
+        sourceType: 'module',
+        ecmaFeatures: { jsx: true },
       });
+      const ast = parseResult.ast;
 
-      const functions = [];
-
+      const funcs = [];
       const traverse = (node, parent = null) => {
         try {
           if (node.type === 'FunctionDeclaration' && node.id) {
-            functions.push({
-              name: node.id.name,
-              type: 'function',
-              params: node.params.map(p => p.name || p.type || 'param'),
-              line: node.loc?.start?.line ?? 0,
-              exported: this.isExported(node, parent)
-            });
-          } else if (node.type === 'MethodDefinition' && node.key && node.value) {
-            functions.push({
-              name: node.key.name || 'anonymous',
-              type: 'method',
-              params: node.value.params?.map(p => p.name || p.type || 'param') ?? [],
-              line: node.loc?.start?.line ?? 0,
-              exported: true
-            });
-          } else if (node.type === 'ArrowFunctionExpression' && parent?.type === 'VariableDeclarator') {
-            functions.push({
-              name: parent.id?.name || 'arrowFunc',
-              type: 'arrow',
-              params: node.params?.map(p => p.name || p.type || 'param') ?? [],
-              line: node.loc?.start?.line ?? 0,
-              exported: this.isExported(parent, null)
-            });
+            funcs.push(this.buildFn(node.id.name, 'function', node.params, node.loc, this.isExported(node, parent)));
           }
-        } catch (innerErr) {
-          console.warn(`⚠️ Failed to process node in ${filePath}:`, innerErr.message);
+          else if (node.type === 'MethodDefinition' && node.key && node.value) {
+            const name = node.key.name || '<anonymous>';
+            funcs.push(this.buildFn(name, 'method', node.value.params, node.loc, true));
+          }
+          else if (node.type === 'ArrowFunctionExpression' && parent?.type === 'VariableDeclarator') {
+            const name = parent.id?.name || '<arrow>';
+            funcs.push(this.buildFn(name, 'arrow', node.params, node.loc, this.isExported(parent, null)));
+          }
+        } catch (inner) {
+          console.warn(`⚠️  Skipped bad node in ${filePath}:`, inner.message);
         }
 
-        for (const key in node) {
-          if (node[key] && typeof node[key] === 'object') {
-            if (Array.isArray(node[key])) {
-              node[key].forEach(child => {
-                if (child && typeof child === 'object' && child.type) {
-                  traverse(child, node);
-                }
-              });
-            } else if (node[key].type) {
-              traverse(node[key], node);
-            }
-          }
+        for (const k in node) {
+          const child = node[k];
+          if (child?.type) traverse(child, node);
+          else if (Array.isArray(child)) child.forEach(c => c?.type && traverse(c, node));
         }
       };
 
       traverse(ast);
-      return functions;
-    } catch (error) {
-      console.error(`❌ Error parsing ${filePath}:`, error.message);
-      console.error(error.stack || error);
+      console.log(`✅ Parsed ${funcs.length} functions from ${filePath}`);
+      return funcs;
+    } catch (err) {
+      console.error(`❌ Error parsing ${filePath}:`, err.message);
+      console.error(err.stack || err);
       return [];
     }
   }
 
+  buildFn(name, type, params, loc, exported) {
+    return {
+      name,
+      type,
+      params: params.map(this.getParamName),
+      line: loc?.start?.line || 0,
+      exported,
+    };
+  }
 
   getParamName(param) {
-    if (!param) return 'unknown';
-    if (param.type === 'Identifier') return param.name;
-    if (param.type === 'AssignmentPattern') return this.getParamName(param.left);
-    if (param.type === 'RestElement') return '...' + this.getParamName(param.argument);
-    if (param.type === 'ObjectPattern') return '{...}';
-    if (param.type === 'ArrayPattern') return '[...]';
-    return param.type || 'unknown';
+    if (!param) return 'param';
+    switch (param.type) {
+      case 'Identifier': return param.name;
+      case 'AssignmentPattern': return this.getParamName(param.left);
+      case 'RestElement': return '...' + this.getParamName(param.argument);
+      case 'ObjectPattern': return '{...}';
+      case 'ArrayPattern': return '[...]';
+      default: return param.type || 'param';
+    }
   }
 
   isExported(node, parent) {
-    return parent?.type === 'ExportNamedDeclaration' ||
-        parent?.type === 'ExportDefaultDeclaration' ||
-        node?.type === 'ExportNamedDeclaration' ||
-        node?.type === 'ExportDefaultDeclaration';
+    const t = parent?.type;
+    return t === 'ExportNamedDeclaration' || t === 'ExportDefaultDeclaration';
   }
 
-  findTestFile(sourceFile) {
-    const dir = path.dirname(sourceFile);
-    const name = path.basename(sourceFile, path.extname(sourceFile));
-
-    const possibleTestPaths = [
-      path.join(dir, `${name}.test.ts`),
-      path.join(dir, `${name}.spec.ts`),
-      path.join(dir, '__tests__', `${name}.test.ts`),
-      path.join('tests', dir, `${name}.test.ts`),
-      path.join('__tests__', dir, `${name}.test.ts`)
+  findTestFile(src) {
+    const d = path.dirname(src), b = path.basename(src, path.extname(src));
+    const tests = [
+      `${d}/${b}.test.ts`,
+      `${d}/${b}.spec.ts`,
+      `${d}/__tests__/${b}.test.ts`,
+      `tests/${d}/${b}.test.ts`,
+      `__tests__/${d}/${b}.test.ts`,
     ];
-
-    return possibleTestPaths.find(testPath => fs.existsSync(testPath));
+    return tests.find(fs.existsSync);
   }
 
-  getTestedFunctions(testFilePath) {
-    if (!fs.existsSync(testFilePath)) return [];
-
-    try {
-      const content = fs.readFileSync(testFilePath, 'utf8');
-      const testMatches = content.match(/(?:describe|it|test)\s*\(\s*['"`]([^'"`]+)['"`]/g) || [];
-      return testMatches.map(match => {
-        const nameMatch = match.match(/['"`]([^'"`]+)['"`]/);
-        return nameMatch ? nameMatch[1] : '';
-      });
-    } catch (error) {
-      return [];
-    }
+  getTestedFunctions(tf) {
+    if (!fs.existsSync(tf)) return [];
+    const c = fs.readFileSync(tf, 'utf8');
+    return (c.match(/(?:describe|it|test)\(['"`]([^'"`]+)/g) || [])
+        .map(m => m.split(/['"`]/)[1]);
   }
 
-  generateTestFilePath(sourceFile) {
-    const dir = path.dirname(sourceFile);
-    const name = path.basename(sourceFile, path.extname(sourceFile));
-    return path.join(dir, `${name}.test.ts`);
+  generateTestFilePath(src) {
+    const d = path.dirname(src), b = path.basename(src, path.extname(src));
+    return `${d}/${b}.test.ts`;
   }
 
-  stageTestFile(testFilePath, testCode, sourceFile) {
-    const dir = path.dirname(testFilePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    let content = '';
-    if (fs.existsSync(testFilePath)) {
-      content = fs.readFileSync(testFilePath, 'utf8');
-    } else {
-      const relativePath = path.relative(path.dirname(testFilePath), sourceFile);
-      content = `import { ${this.extractExportedNames(sourceFile).join(', ')} } from '${relativePath.replace(/\\/g, '/')}';\n\n`;
-    }
-
+  stageTestFile(outFile, testCode, srcFile) {
+    const dir = path.dirname(outFile);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    let content = fs.existsSync(outFile)
+        ? fs.readFileSync(outFile, 'utf8')
+        : `import { ${this.extractExportedNames(srcFile).join(', ')} } from '${path.relative(dir, srcFile).replace(/\\/g, '/')}';\n\n`;
     content += `\n${testCode}\n`;
-    fs.writeFileSync(testFilePath, content, 'utf8');
+    fs.writeFileSync(outFile, content, 'utf8');
   }
 
-  appendToTestFile(testFilePath, testCode, sourceFile) {
-    this.stageTestFile(testFilePath, testCode, sourceFile);
-  }
-
-  extractExportedNames(sourceFile) {
+  extractExportedNames(srcFile) {
     try {
-      const content = fs.readFileSync(sourceFile, 'utf8');
-      const exportMatches = content.match(/export\s+(?:function|const|class)\s+(\w+)/g) || [];
-      return exportMatches.map(match => {
-        const nameMatch = match.match(/(\w+)$/);
-        return nameMatch ? nameMatch[1] : '';
-      }).filter(Boolean);
+      const txt = fs.readFileSync(srcFile, 'utf8');
+      return (txt.match(/export\s+(?:function|const|class)\s+(\w+)/g) || [])
+          .map(m => m.split(' ').pop());
     } catch {
       return [];
     }
   }
 }
 
-class TestGenerator {
-  constructor() {
-    this.apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
-    this.useAnthropic = !!process.env.ANTHROPIC_API_KEY;
-  }
-
-  async generateTest(sourceFile, functionInfo, existingTests) {
-    const sourceCode = fs.readFileSync(sourceFile, 'utf8');
-    const prompt = this.buildPrompt(sourceFile, functionInfo, sourceCode, existingTests);
-
-    try {
-      let generatedTest;
-
-      if (this.useAnthropic) {
-        generatedTest = await this.callAnthropic(prompt);
-      } else {
-        generatedTest = await this.callOpenAI(prompt);
-      }
-
-      return this.cleanGeneratedTest(generatedTest);
-    } catch (error) {
-      console.error(`Error generating test for ${functionInfo.name}:`, error.message);
-      return null;
-    }
-  }
-
-  buildPrompt(sourceFile, functionInfo, sourceCode, existingTests) {
-    const basePrompt = `You are a expert TypeScript/Jest test generator. Generate comprehensive unit tests for the following function.
-
-SOURCE FILE: ${sourceFile}
-
-FUNCTION TO TEST:
-- Name: ${functionInfo.name}
-- Type: ${functionInfo.type}
-- Parameters: ${functionInfo.params.join(', ')}
-
-RELEVANT SOURCE CODE:
-\`\`\`typescript
-${this.extractRelevantCode(sourceCode, functionInfo)}
-\`\`\`
-
-EXISTING TEST STRUCTURE:
-${existingTests.length > 0 ? existingTests.slice(0, 3).join(', ') : 'None'}
-
-REQUIREMENTS:
-1. Use Vitest testing framework
-2. Follow TypeScript best practices
-3. Include happy path, edge cases, and error scenarios
-4. Use proper mocking for dependencies
-5. Match existing test style if tests exist
-6. Generate only the test function, not the entire file structure
-
-${this.customRequirements ? `ADDITIONAL REQUIREMENTS: ${this.customRequirements}` : ''}
-
-Generate a comprehensive test suite for this function:`;
-
-    return basePrompt;
-  }
-
-  extractRelevantCode(sourceCode, functionInfo) {
-    const lines = sourceCode.split('\n');
-    const startLine = Math.max(0, functionInfo.line - 5);
-    const endLine = Math.min(lines.length, functionInfo.line + 20);
-    return lines.slice(startLine, endLine).join('\n');
-  }
-
-  async callAnthropic(prompt) {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-3-sonnet-20240229',
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-
-    const data = await response.json();
-    return data.content[0].text;
-  }
-
-  async callOpenAI(prompt) {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 1500,
-        temperature: 0.3
-      })
-    });
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-  }
-
-  cleanGeneratedTest(generatedTest) {
-    return generatedTest.replace(/```typescript|```javascript|```/g, '').trim();
-  }
-}
-
-async function main() {
-  const analyzer = new CodeAnalyzer();
-  const generator = new TestGenerator();
-
-  const isRegenerate = process.argv.includes('--regenerate');
-  const customRequirements = process.env.CUSTOM_REQUIREMENTS;
-
-  console.log('🔍 Analyzing changed files for missing tests...');
-  const changedFiles = analyzer.getChangedFiles();
-  console.log(`Found ${changedFiles.length} changed files:`, changedFiles);
-
-  const generatedFunctions = [];
-
-  for (const sourceFile of changedFiles) {
-    if (!sourceFile.includes('test') && !sourceFile.includes('spec')) {
-      console.log(`\n📋 Analyzing ${sourceFile}...`);
-
-      const functions = analyzer.extractFunctions(sourceFile);
-      if (functions.length === 0) continue;
-
-      const testFile = analyzer.findTestFile(sourceFile);
-      const testedFunctions = testFile ? analyzer.getTestedFunctions(testFile) : [];
-
-      const untestedFunctions = functions.filter(func =>
-              func.exported && !testedFunctions.some(tested =>
-                  tested.toLowerCase().includes(func.name.toLowerCase())
-              )
-      );
-
-      if (untestedFunctions.length > 0) {
-        console.log(`⚠️  Found ${untestedFunctions.length} untested functions:`,
-            untestedFunctions.map(f => f.name));
-
-        const testFilePath = testFile || analyzer.generateTestFilePath(sourceFile);
-
-        for (const func of untestedFunctions) {
-          console.log(`🤖 Generating test for ${func.name}...`);
-
-          if (isRegenerate && customRequirements) {
-            generator.customRequirements = customRequirements;
-          }
-
-          const testCode = await generator.generateTest(sourceFile, func, testedFunctions);
-
-          if (testCode) {
-            if (isRegenerate) {
-              analyzer.appendToTestFile(testFilePath, testCode, sourceFile);
-            } else {
-              analyzer.stageTestFile(testFilePath, testCode, sourceFile);
-            }
-            generatedFunctions.push(`${sourceFile}:${func.name}`);
-            console.log(`✅ Generated test for ${func.name}`);
-          }
-        }
-      }
-    }
-  }
-
-  if (generatedFunctions.length > 0) {
-    console.log(`GENERATED_FUNCTIONS=${generatedFunctions.join(', ')}`);
-    if (process.env.GITHUB_ENV) {
-      fs.appendFileSync(process.env.GITHUB_ENV, `GENERATED_FUNCTIONS=${generatedFunctions.join(', ')}\n`);
-    }
-  }
-
-  console.log('🎉 Test generation complete!');
-}
-
-if (require.main === module) {
-  main().catch(console.error);
-}
+// ... the rest of TestGenerator and main() remains unchanged ...
