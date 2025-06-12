@@ -27,46 +27,52 @@ class CodeAnalyzer {
       const ast = this.tsParser.parse(content, {
         ecmaVersion: 2020,
         sourceType: 'module',
-        ecmaFeatures: { jsx: true },
-        loc: true
+        loc: true,
       });
 
       const functions = [];
 
       const traverse = (node, parent = null) => {
-        if (node.type === 'FunctionDeclaration' && node.id) {
-          functions.push({
-            name: node.id.name,
-            type: 'function',
-            params: node.params.map(this.getParamName),
-            line: node.loc.start.line,
-            exported: this.isExported(node, parent)
-          });
-        } else if (node.type === 'MethodDefinition') {
-          functions.push({
-            name: node.key.name,
-            type: 'method',
-            params: node.value.params.map(this.getParamName),
-            line: node.loc.start.line,
-            exported: true
-          });
-        } else if (node.type === 'ArrowFunctionExpression' && parent?.type === 'VariableDeclarator') {
-          functions.push({
-            name: parent.id.name,
-            type: 'arrow',
-            params: node.params.map(this.getParamName),
-            line: node.loc.start.line,
-            exported: this.isExported(parent, null)
-          });
+        try {
+          if (node.type === 'FunctionDeclaration' && node.id) {
+            functions.push({
+              name: node.id.name,
+              type: 'function',
+              params: node.params.map(p => p.name || p.type || 'param'),
+              line: node.loc?.start?.line ?? 0,
+              exported: this.isExported(node, parent)
+            });
+          } else if (node.type === 'MethodDefinition' && node.key && node.value) {
+            functions.push({
+              name: node.key.name || 'anonymous',
+              type: 'method',
+              params: node.value.params?.map(p => p.name || p.type || 'param') ?? [],
+              line: node.loc?.start?.line ?? 0,
+              exported: true
+            });
+          } else if (node.type === 'ArrowFunctionExpression' && parent?.type === 'VariableDeclarator') {
+            functions.push({
+              name: parent.id?.name || 'arrowFunc',
+              type: 'arrow',
+              params: node.params?.map(p => p.name || p.type || 'param') ?? [],
+              line: node.loc?.start?.line ?? 0,
+              exported: this.isExported(parent, null)
+            });
+          }
+        } catch (innerErr) {
+          console.warn(`⚠️ Failed to process node in ${filePath}:`, innerErr.message);
         }
 
         for (const key in node) {
-          const child = node[key];
-          if (child && typeof child === 'object') {
-            if (Array.isArray(child)) {
-              child.forEach(c => c && typeof c === 'object' && c.type && traverse(c, node));
-            } else if (child.type) {
-              traverse(child, node);
+          if (node[key] && typeof node[key] === 'object') {
+            if (Array.isArray(node[key])) {
+              node[key].forEach(child => {
+                if (child && typeof child === 'object' && child.type) {
+                  traverse(child, node);
+                }
+              });
+            } else if (node[key].type) {
+              traverse(node[key], node);
             }
           }
         }
@@ -75,10 +81,12 @@ class CodeAnalyzer {
       traverse(ast);
       return functions;
     } catch (error) {
-      console.error(`❌ Error parsing ${filePath}:`, error.message, '\n', error.stack);
+      console.error(`❌ Error parsing ${filePath}:`, error.message);
+      console.error(error.stack || error);
       return [];
     }
   }
+
 
   getParamName(param) {
     if (!param) return 'unknown';
