@@ -34,7 +34,11 @@ class CodeAnalyzer {
       const ast = parseResult.ast;
 
       const funcs = [];
-      const traverse = (node, parent = null) => {
+      const traverse = (node, parent = null, visited = new Set()) => {
+        // Prevent infinite recursion on circular references
+        if (visited.has(node)) return;
+        visited.add(node);
+
         try {
           if (node.type === 'FunctionDeclaration' && node.id) {
             funcs.push(this.buildFn(node.id.name, 'function', node.params, node.loc, this.isExported(node, parent)));
@@ -53,8 +57,8 @@ class CodeAnalyzer {
 
         for (const k in node) {
           const child = node[k];
-          if (child?.type) traverse(child, node);
-          else if (Array.isArray(child)) child.forEach(c => c?.type && traverse(c, node));
+          if (child?.type) traverse(child, node, visited);
+          else if (Array.isArray(child)) child.forEach(c => c?.type && traverse(c, node, visited));
         }
       };
 
