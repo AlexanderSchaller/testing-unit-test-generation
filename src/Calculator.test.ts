@@ -33,9 +33,6 @@ test.describe('Calculator', () => {
   })
 })
 
-import { test } from 'vitest'
-import { Calculator } from '../src/Calculator'
-
 test('subtract - happy path', () => {
   const calculator = new Calculator()
   const result = calculator.subtract(5, 3)
