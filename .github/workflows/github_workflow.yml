@@ -30,13 +30,10 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm install
-          npm install -g @typescript-eslint/parser @babel/parser
+        run: npm ci
 
-      - name: Install test generator dependencies
-        run: |
-          npm install --no-save typescript @typescript-eslint/parser glob openai
+      - name: Install test generation dependencies
+        run: npm install --no-save typescript @typescript-eslint/parser @babel/parser glob openai
 
       - name: Check for existing bot comments
         id: check_comments
@@ -53,38 +50,33 @@ jobs:
               comment.body.includes('🤖 **Unit Tests Generated**')
             );
 
-            if (botComment) {
-              console.log('Found existing test suggestion comment');
-              core.setOutput('exists', 'true');
-            } else {
-              console.log('No existing test suggestion comment found');
-              core.setOutput('exists', 'false');
-            }
+            core.setOutput('exists', Boolean(botComment));
+            console.log(botComment ? 'Found existing test suggestion comment' : 'No existing test suggestion comment found');
 
       - name: Generate missing tests
         if: steps.check_comments.outputs.exists != 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          node .github/scripts/generate-tests.js
+        run: node .github/scripts/generate-tests.js
 
-      - name: Check for generated tests
+      - name: Stage and check for generated tests
         id: check_tests
         run: |
-          # Stage all changes first
           git add .
-          # Check if there are any changes
           if git diff --cached --quiet; then
             echo "generated=false" >> $GITHUB_OUTPUT
+            echo "No new tests were generated"
           else
             echo "generated=true" >> $GITHUB_OUTPUT
+            echo "New tests were generated"
           fi
 
-      - name: Create test suggestions directory
+      - name: Save test suggestions
         if: steps.check_tests.outputs.generated == 'true' && steps.check_comments.outputs.exists != 'true'
         run: |
           mkdir -p .github/test-suggestions
+          git diff --cached --name-only | xargs -I {} cp --parents {} .github/test-suggestions/
           git stash push -m "Generated tests"
 
       - name: Comment on PR with test suggestions
@@ -94,11 +86,9 @@ jobs:
           script: |
             const { execSync } = require('child_process');
             
-            // Get the stashed changes
             const diffOutput = execSync('git stash show -p', { encoding: 'utf8' });
             
-            // Create a collapsible comment with the generated tests
-            const body = `🤖 **Unit Tests Generated** 
+            const body = `🤖 **Unit Tests Generated**
 
             I've detected functions that are missing unit tests and generated comprehensive test suites for them.
 
@@ -130,5 +120,4 @@ jobs:
               body: body
             });
             
-            // Store comment ID for later use
             console.log(`Comment created with ID: ${comment.data.id}`);
