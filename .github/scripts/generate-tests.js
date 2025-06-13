@@ -6,7 +6,6 @@ const glob = require('glob');
 class CodeAnalyzer {
   constructor() {
     this.tsParser = require('@typescript-eslint/parser');
-    this.getParamName = this.getParamName.bind(this);
   }
 
   getChangedFiles() {
@@ -25,69 +24,72 @@ class CodeAnalyzer {
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       const ast = this.tsParser.parse(content, {
-        ecmaVersion: 2020,
+        range: true,
+        loc: true,
+        tokens: true,
+        comment: true,
+        ecmaVersion: 'latest',
         sourceType: 'module',
         ecmaFeatures: { jsx: true },
-        loc: true
+        parser: require('typescript')
       });
 
       const functions = [];
 
       const traverse = (node, parent = null) => {
-        if (node.type === 'FunctionDeclaration' && node.id) {
-          functions.push({
-            name: node.id.name,
-            type: 'function',
-            params: node.params.map(this.getParamName),
-            line: node.loc.start.line,
-            exported: this.isExported(node, parent)
-          });
-        } else if (node.type === 'MethodDefinition') {
-          functions.push({
-            name: node.key.name,
-            type: 'method',
-            params: node.value.params.map(this.getParamName),
-            line: node.loc.start.line,
-            exported: true
-          });
-        } else if (node.type === 'ArrowFunctionExpression' && parent?.type === 'VariableDeclarator') {
-          functions.push({
-            name: parent.id.name,
-            type: 'arrow',
-            params: node.params.map(this.getParamName),
-            line: node.loc.start.line,
-            exported: this.isExported(parent, null)
-          });
-        }
+        if (!node || typeof node !== 'object') return;
 
-        for (const key in node) {
-          const child = node[key];
-          if (child && typeof child === 'object') {
-            if (Array.isArray(child)) {
-              child.forEach(c => c && typeof c === 'object' && c.type && traverse(c, node));
-            } else if (child.type) {
-              traverse(child, node);
+        try {
+          if (node.type === 'FunctionDeclaration' && node.id) {
+            functions.push({
+              name: node.id.name,
+              type: 'function',
+              params: (node.params || []).map(p => p?.name || p?.type || 'unknown'),
+              line: node.loc?.start?.line || 0,
+              exported: this.isExported(node, parent)
+            });
+          } else if (node.type === 'MethodDefinition' && node.key) {
+            functions.push({
+              name: node.key.name,
+              type: 'method',
+              params: (node.value?.params || []).map(p => p?.name || p?.type || 'unknown'),
+              line: node.loc?.start?.line || 0,
+              exported: true
+            });
+          } else if (node.type === 'ArrowFunctionExpression' && parent?.type === 'VariableDeclarator' && parent.id) {
+            functions.push({
+              name: parent.id.name,
+              type: 'arrow',
+              params: (node.params || []).map(p => p?.name || p?.type || 'unknown'),
+              line: node.loc?.start?.line || 0,
+              exported: this.isExported(parent, null)
+            });
+          }
+
+          for (const key in node) {
+            if (node[key] && typeof node[key] === 'object') {
+              if (Array.isArray(node[key])) {
+                node[key].forEach(child => {
+                  if (child && typeof child === 'object' && child.type) {
+                    traverse(child, node);
+                  }
+                });
+              } else if (node[key].type) {
+                traverse(node[key], node);
+              }
             }
           }
+        } catch (traverseError) {
+          console.error(`Error traversing node in ${filePath}:`, traverseError.message);
         }
       };
 
       traverse(ast);
       return functions;
     } catch (error) {
-      console.error(`❌ Error parsing ${filePath}:`, error.message, '\n', error.stack);
+      console.error(`Error parsing ${filePath}:`, error.message);
       return [];
     }
-  }
-
-  getParamName(param) {
-    if (!param) return 'unknown';
-    if (param.type === 'Identifier') return param.name;
-    if (param.type === 'AssignmentPattern') return this.getParamName(param.left);
-    if (param.type === 'RestElement') return '...' + this.getParamName(param.argument);
-    if (param.type === 'ObjectPattern') return '{...}';
-    if (param.type === 'ArrayPattern') return '[...]';
-    return param.type || 'unknown';
   }
 
   isExported(node, parent) {
@@ -123,6 +125,7 @@ class CodeAnalyzer {
         return nameMatch ? nameMatch[1] : '';
       });
     } catch (error) {
+      console.error(`Error reading test file ${testFilePath}:`, error.message);
       return [];
     }
   }
@@ -134,36 +137,41 @@ class CodeAnalyzer {
   }
 
   stageTestFile(testFilePath, testCode, sourceFile) {
-    const dir = path.dirname(testFilePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    try {
+      const dir = path.dirname(testFilePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      let content = '';
+      if (fs.existsSync(testFilePath)) {
+        content = fs.readFileSync(testFilePath, 'utf8');
+      } else {
+        const relativePath = path.relative(path.dirname(testFilePath), sourceFile)
+            .replace(/\\/g, '/');
+        const exportedNames = this.extractExportedNames(sourceFile);
+        content = `import { ${exportedNames.join(', ')} } from '${relativePath}';\n\n`;
+      }
+
+      content += `\n${testCode}\n`;
+      fs.writeFileSync(testFilePath, content, 'utf8');
+    } catch (error) {
+      console.error(`Error staging test file ${testFilePath}:`, error.message);
     }
-
-    let content = '';
-    if (fs.existsSync(testFilePath)) {
-      content = fs.readFileSync(testFilePath, 'utf8');
-    } else {
-      const relativePath = path.relative(path.dirname(testFilePath), sourceFile);
-      content = `import { ${this.extractExportedNames(sourceFile).join(', ')} } from '${relativePath.replace(/\\/g, '/')}';\n\n`;
-    }
-
-    content += `\n${testCode}\n`;
-    fs.writeFileSync(testFilePath, content, 'utf8');
-  }
-
-  appendToTestFile(testFilePath, testCode, sourceFile) {
-    this.stageTestFile(testFilePath, testCode, sourceFile);
   }
 
   extractExportedNames(sourceFile) {
     try {
       const content = fs.readFileSync(sourceFile, 'utf8');
       const exportMatches = content.match(/export\s+(?:function|const|class)\s+(\w+)/g) || [];
-      return exportMatches.map(match => {
-        const nameMatch = match.match(/(\w+)$/);
-        return nameMatch ? nameMatch[1] : '';
-      }).filter(Boolean);
-    } catch {
+      return exportMatches
+          .map(match => {
+            const nameMatch = match.match(/(\w+)$/);
+            return nameMatch ? nameMatch[1] : '';
+          })
+          .filter(Boolean);
+    } catch (error) {
+      console.error(`Error extracting exported names from ${sourceFile}:`, error.message);
       return [];
     }
   }
@@ -180,14 +188,9 @@ class TestGenerator {
     const prompt = this.buildPrompt(sourceFile, functionInfo, sourceCode, existingTests);
 
     try {
-      let generatedTest;
-
-      if (this.useAnthropic) {
-        generatedTest = await this.callAnthropic(prompt);
-      } else {
-        generatedTest = await this.callOpenAI(prompt);
-      }
-
+      const generatedTest = this.useAnthropic ?
+          await this.callAnthropic(prompt) :
+          await this.callOpenAI(prompt);
       return this.cleanGeneratedTest(generatedTest);
     } catch (error) {
       console.error(`Error generating test for ${functionInfo.name}:`, error.message);
@@ -196,7 +199,7 @@ class TestGenerator {
   }
 
   buildPrompt(sourceFile, functionInfo, sourceCode, existingTests) {
-    const basePrompt = `You are a expert TypeScript/Jest test generator. Generate comprehensive unit tests for the following function.
+    return `You are a expert TypeScript/vitest test generator. Generate comprehensive unit tests for the following function.
 
 SOURCE FILE: ${sourceFile}
 
@@ -214,18 +217,14 @@ EXISTING TEST STRUCTURE:
 ${existingTests.length > 0 ? existingTests.slice(0, 3).join(', ') : 'None'}
 
 REQUIREMENTS:
-1. Use Vitest testing framework
+1. Use vitest testing framework
 2. Follow TypeScript best practices
 3. Include happy path, edge cases, and error scenarios
 4. Use proper mocking for dependencies
 5. Match existing test style if tests exist
 6. Generate only the test function, not the entire file structure
 
-${this.customRequirements ? `ADDITIONAL REQUIREMENTS: ${this.customRequirements}` : ''}
-
 Generate a comprehensive test suite for this function:`;
-
-    return basePrompt;
   }
 
   extractRelevantCode(sourceCode, functionInfo) {
@@ -274,18 +273,19 @@ Generate a comprehensive test suite for this function:`;
   }
 
   cleanGeneratedTest(generatedTest) {
-    return generatedTest.replace(/```typescript|```javascript|```/g, '').trim();
+    return generatedTest
+        .replace(/```typescript|```javascript|```/g, '')
+        .trim();
   }
 }
 
 async function main() {
   const analyzer = new CodeAnalyzer();
   const generator = new TestGenerator();
-
   const isRegenerate = process.argv.includes('--regenerate');
-  const customRequirements = process.env.CUSTOM_REQUIREMENTS;
 
   console.log('🔍 Analyzing changed files for missing tests...');
+
   const changedFiles = analyzer.getChangedFiles();
   console.log(`Found ${changedFiles.length} changed files:`, changedFiles);
 
@@ -316,18 +316,10 @@ async function main() {
         for (const func of untestedFunctions) {
           console.log(`🤖 Generating test for ${func.name}...`);
 
-          if (isRegenerate && customRequirements) {
-            generator.customRequirements = customRequirements;
-          }
-
           const testCode = await generator.generateTest(sourceFile, func, testedFunctions);
 
           if (testCode) {
-            if (isRegenerate) {
-              analyzer.appendToTestFile(testFilePath, testCode, sourceFile);
-            } else {
-              analyzer.stageTestFile(testFilePath, testCode, sourceFile);
-            }
+            analyzer.stageTestFile(testFilePath, testCode, sourceFile);
             generatedFunctions.push(`${sourceFile}:${func.name}`);
             console.log(`✅ Generated test for ${func.name}`);
           }
@@ -336,11 +328,11 @@ async function main() {
     }
   }
 
-  if (generatedFunctions.length > 0) {
-    console.log(`GENERATED_FUNCTIONS=${generatedFunctions.join(', ')}`);
-    if (process.env.GITHUB_ENV) {
-      fs.appendFileSync(process.env.GITHUB_ENV, `GENERATED_FUNCTIONS=${generatedFunctions.join(', ')}\n`);
-    }
+  if (generatedFunctions.length > 0 && process.env.GITHUB_ENV) {
+    fs.appendFileSync(
+        process.env.GITHUB_ENV,
+        `GENERATED_FUNCTIONS=${generatedFunctions.join(', ')}\n`
+    );
   }
 
   console.log('🎉 Test generation complete!');
