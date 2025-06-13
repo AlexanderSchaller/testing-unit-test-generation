@@ -18,10 +18,6 @@ export class Calculator {
         return a / b;
     }
 
-    power(base: number, exponent: number): number {
-        return Math.pow(base, exponent);
-    }
-
     factorial(n: number): number {
         if (n < 0) {
             throw new Error('Factorial is not defined for negative numbers');
