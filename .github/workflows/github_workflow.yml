@@ -48,7 +48,10 @@ jobs:
       - name: Check for generated tests
         id: check_tests
         run: |
-          if git diff --quiet; then
+          # Stage all changes first
+          git add .
+          # Check if there are any changes
+          if git diff --cached --quiet; then
             echo "generated=false" >> $GITHUB_OUTPUT
           else
             echo "generated=true" >> $GITHUB_OUTPUT
@@ -58,7 +61,7 @@ jobs:
         if: steps.check_tests.outputs.generated == 'true'
         run: |
           mkdir -p .github/test-suggestions
-          git add . && git stash push -m "Generated tests"
+          git stash push -m "Generated tests"
 
       - name: Comment on PR with test suggestions
         if: steps.check_tests.outputs.generated == 'true'
@@ -72,26 +75,26 @@ jobs:
             
             // Create a collapsible comment with the generated tests
             const body = `🤖 **Unit Tests Generated** 
-            
+
             I've detected functions that are missing unit tests and generated comprehensive test suites for them.
-            
+
             **Options:**
             - React with 👍 and comment "approve tests" to automatically commit these tests
             - React with 👎 if you don't want these tests
             - Comment with specific feedback for modifications
-            
+
             <details>
             <summary>📋 View Generated Tests (Click to expand)</summary>
-            
+
             \`\`\`diff
             ${diffOutput}
             \`\`\`
-            
+
             </details>
-            
+
             **Functions with generated tests:**
             ${process.env.GENERATED_FUNCTIONS || 'Check the diff above for details'}
-            
+
             ---
             *To apply these tests, comment "approve tests" or react with 👍*
             *To regenerate with different requirements, comment "regenerate tests with [your requirements]"*`;
