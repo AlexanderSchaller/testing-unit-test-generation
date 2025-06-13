@@ -5,15 +5,20 @@ on:
     types: [created]
   pull_request_review:
     types: [submitted]
+  reaction:
+    types: [created]
 
 jobs:
   handle-test-approval:
-    if: github.event.issue.pull_request && (contains(github.event.comment.body, 'approve tests') || contains(github.event.comment.body, 'regenerate tests'))
+    if: |
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && (contains(github.event.comment.body, 'approve tests') || contains(github.event.comment.body, 'regenerate tests'))) ||
+      (github.event_name == 'reaction' && github.event.reaction.content == '+1' && github.event.issue.pull_request) ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
-    
+
     steps:
       - name: Checkout PR code
         uses: actions/checkout@v4
@@ -26,14 +31,17 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Check for approval
+      - name: Check for approval type
         id: check_approval
         run: |
-          if [[ "${{ github.event.comment.body }}" == *"approve tests"* ]]; then
+          if [[ "${{ github.event_name }}" == "reaction" && "${{ github.event.reaction.content }}" == "+1" ]]; then
+            echo "action=approve" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+            echo "action=approve" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.comment.body }}" == *"approve tests"* ]]; then
             echo "action=approve" >> $GITHUB_OUTPUT
           elif [[ "${{ github.event.comment.body }}" == *"regenerate tests"* ]]; then
             echo "action=regenerate" >> $GITHUB_OUTPUT
-            # Extract requirements from comment
             requirements=$(echo "${{ github.event.comment.body }}" | sed -n 's/.*regenerate tests with \(.*\)/\1/p')
             echo "requirements=$requirements" >> $GITHUB_OUTPUT
           fi
@@ -49,7 +57,7 @@ jobs:
             git add .
             git commit -m "✅ Apply approved auto-generated tests
 
-            Co-authored-by: ${{ github.event.comment.user.login }} <${{ github.event.comment.user.login }}@users.noreply.github.com>"
+            Co-authored-by: ${{ github.event.comment.user.login || github.event.sender.login }} <${{ github.event.comment.user.login || github.event.sender.login }}@users.noreply.github.com>"
             git push
           else
             echo "No stashed tests found"
@@ -65,8 +73,8 @@ jobs:
           npm install --no-save typescript @typescript-eslint/parser glob openai
           node .github/scripts/generate-tests.js --regenerate
 
-      - name: React to comment
-        if: steps.check_approval.outputs.action == 'approve'
+      - name: React to trigger
+        if: steps.check_approval.outputs.action == 'approve' && github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
@@ -83,13 +91,13 @@ jobs:
           script: |
             const action = '${{ steps.check_approval.outputs.action }}';
             let body = '';
-            
+
             if (action === 'approve') {
               body = '✅ **Tests Applied Successfully**\n\nThe generated tests have been committed to this PR. Thank you for the approval!';
             } else if (action === 'regenerate') {
               body = '🔄 **Tests Regenerated**\n\nI\'ve regenerated the tests with your specific requirements. Please review the updated suggestions above.';
             }
-            
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -97,14 +105,13 @@ jobs:
               body: body
             });
 
-  # Handle thumbs up/down reactions
-  handle-reaction-approval:
-    if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved'
+  check-bot-comment:
+    if: |
+      github.event_name == 'reaction' && 
+      github.event.reaction.content == '+1'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    
+    outputs:
+      found: ${{ steps.check_bot_comment.outputs.result }}
     steps:
       - name: Check for test bot comment
         uses: actions/github-script@v7
@@ -116,33 +123,55 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number
             });
-            
+
             const botComment = comments.data.find(comment => 
               comment.user.type === 'Bot' && 
+              comment.id === ${{ github.event.comment.id }} &&
               comment.body.includes('Unit Tests Generated')
             );
-            
+
             if (botComment) {
               console.log('Found bot comment with generated tests');
-              return { found: true, commentId: botComment.id };
+              return true;
             }
-            return { found: false };
+            return false;
 
-      - name: Auto-apply tests on approval
-        if: fromJson(steps.check_bot_comment.outputs.result).found
+  apply-approved-tests:
+    needs: check-bot-comment
+    if: needs.check-bot-comment.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout PR code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Apply stashed tests
-        if: fromJson(steps.check_bot_comment.outputs.result).found
         run: |
           if git stash list | grep -q "Generated tests"; then
             git stash pop
             git config --local user.email "action@github.com"
             git config --local user.name "GitHub Action"
             git add .
-            git commit -m "✅ Auto-apply tests (approved via PR review)"
+            git commit -m "✅ Auto-apply tests (approved via reaction)
+
+            Co-authored-by: ${{ github.event.sender.login }} <${{ github.event.sender.login }}@users.noreply.github.com>"
             git push
+          else
+            echo "No stashed tests found"
           fi
+
+      - name: Confirm application
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ **Tests Applied Successfully**\n\nThe generated tests have been committed to this PR. Thank you for the approval!'
+            });
