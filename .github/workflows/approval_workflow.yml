@@ -9,9 +9,9 @@ on:
 jobs:
   handle-test-approval:
     if: |
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request && 
-        (contains(github.event.comment.body, 'approve tests') || 
-         contains(github.event.comment.body, 'regenerate tests'))) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        (contains(github.event.comment.body, '/approve tests') ||
+         contains(github.event.comment.body, '/regenerate tests'))) ||
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
     runs-on: ubuntu-latest
     permissions:
@@ -36,11 +36,11 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
             echo "action=approve" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event.comment.body }}" == *"approve tests"* ]]; then
+          elif [[ "${{ github.event.comment.body }}" == *"/approve tests"* ]]; then
             echo "action=approve" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event.comment.body }}" == *"regenerate tests"* ]]; then
+          elif [[ "${{ github.event.comment.body }}" == *"/regenerate tests"* ]]; then
             echo "action=regenerate" >> $GITHUB_OUTPUT
-            requirements=$(echo "${{ github.event.comment.body }}" | sed -n 's/.*regenerate tests with \(.*\)/\1/p')
+            requirements=$(echo "${{ github.event.comment.body }}" | sed -n 's/.*\/regenerate tests with \(.*\)/\1/p')
             echo "requirements=$requirements" >> $GITHUB_OUTPUT
           fi
 
@@ -56,18 +56,38 @@ jobs:
       - name: Apply approved tests
         if: steps.check_approval.outputs.action == 'approve' && steps.check_suggestions.outputs.exists == 'true'
         run: |
-          # Configure Git
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          # Check if suggestion directory is empty
+          if [ -z "$(ls -A .github/test-suggestions)" ]; then
+            echo "suggestion_dir_empty=true" >> $GITHUB_ENV
+          else
+            # Configure Git
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+          
+            # Copy test suggestions back to their original locations
+            cp -r .github/test-suggestions/* ./
+            rm -rf .github/test-suggestions
+          
+            # Remove any deleted files
+            git ls-files --deleted | xargs -r git rm
+          
+            # Commit and push changes
+            git add .
+            git commit -m "Apply approved tests"
+            git push origin ${{ github.event.pull_request.head.ref || github.head_ref }}
+          fi
 
-          # Copy test suggestions back to their original locations
-          cp -r .github/test-suggestions/* ./
-          rm -rf .github/test-suggestions
-
-          # Commit and push changes
-          git add .
-          git commit -m "Apply approved tests"
-          git push origin ${{ github.event.pull_request.head.ref || github.head_ref }}
+      - name: Comment on PR for empty suggestions
+        if: steps.check_approval.outputs.action == 'approve' && env.suggestion_dir_empty == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.name,
+              issue_number: context.issue.number,
+              body: 'No test suggestions were found to apply. Please regenerate tests first.'
+            })
 
       - name: Regenerate tests
         if: steps.check_approval.outputs.action == 'regenerate'
@@ -86,7 +106,7 @@ jobs:
           fi
 
           # Stage and check for generated tests
-          git add .
+          git add -A
           if git diff --cached --quiet; then
             echo "No new tests were generated"
             exit 0
@@ -94,7 +114,10 @@ jobs:
 
           # Save generated tests to suggestions directory
           mkdir -p .github/test-suggestions
-          git diff --cached --name-only | xargs -I {} cp --parents {} .github/test-suggestions/
+          for file in $(git diff --cached --name-only); do
+            mkdir -p ".github/test-suggestions/$(dirname "$file")"
+            cp "$file" ".github/test-suggestions/$file"
+          done
 
           # Configure Git
           git config user.name "GitHub Actions"
@@ -102,5 +125,6 @@ jobs:
 
           # Commit and push changes to test-suggestions directory
           git add .github/test-suggestions
+          git reset --hard HEAD
           git commit -m "Save regenerated test suggestions"
           git push origin ${{ github.event.pull_request.head.ref || github.head_ref }}

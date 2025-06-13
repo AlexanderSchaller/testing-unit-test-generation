@@ -110,7 +110,7 @@ jobs:
             ${process.env.GENERATED_FUNCTIONS || 'Check the diff above for details'}
 
             ---
-            *To apply these tests, comment "approve tests"
+            *To apply these tests, comment "approve tests"*
             *To regenerate with different requirements, comment "regenerate tests with [your requirements]"*`;
             
             const comment = await github.rest.issues.createComment({
