@@ -47,6 +47,42 @@ jobs:
       - name: Apply approved tests
         if: steps.check_approval.outputs.action == 'approve'
         run: |
+          # Configure Git
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
           # Ensure we're on the correct branch
           git fetch origin ${{ github.event.pull_request.head.ref || github.head_ref }}
           git checkout ${{ github.event.pull_request.head.ref || github.head_ref }}
+
+          # Apply the stashed tests
+          git stash pop || echo "No stashed changes found"
+
+          # Commit and push if there are changes
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add .
+            git commit -m "Apply approved tests"
+            git push origin ${{ github.event.pull_request.head.ref || github.head_ref }}
+          fi
+
+      - name: Regenerate tests
+        if: steps.check_approval.outputs.action == 'regenerate'
+        run: |
+          # Install dependencies
+          npm ci
+
+          # Run test generation with requirements if provided
+          if [[ -n "${{ steps.check_approval.outputs.requirements }}" ]]; then
+            npm run generate-tests -- "${{ steps.check_approval.outputs.requirements }}"
+          else
+            npm run generate-tests
+          fi
+
+          # Configure Git
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          # Commit and push changes
+          git add .
+          git commit -m "Regenerate tests with provided requirements"
+          git push origin ${{ github.event.pull_request.head.ref || github.head_ref }}

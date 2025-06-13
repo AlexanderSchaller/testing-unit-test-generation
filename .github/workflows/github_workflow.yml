@@ -93,7 +93,7 @@ jobs:
             I've detected functions that are missing unit tests and generated comprehensive test suites for them.
 
             **Options:**
-            - React with 👍 and comment "approve tests" to automatically commit these tests
+            - Comment "approve tests" to automatically commit these tests
             - React with 👎 if you don't want these tests
             - Comment with specific feedback for modifications
 
@@ -110,7 +110,7 @@ jobs:
             ${process.env.GENERATED_FUNCTIONS || 'Check the diff above for details'}
 
             ---
-            *To apply these tests, comment "approve tests" or react with 👍*
+            *To apply these tests, comment "approve tests"
             *To regenerate with different requirements, comment "regenerate tests with [your requirements]"*`;
             
             const comment = await github.rest.issues.createComment({
