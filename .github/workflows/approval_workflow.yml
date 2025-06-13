@@ -5,14 +5,13 @@ on:
     types: [created]
   pull_request_review:
     types: [submitted]
-  reaction:
-    types: [created]
 
 jobs:
   handle-test-approval:
     if: |
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request && (contains(github.event.comment.body, 'approve tests') || contains(github.event.comment.body, 'regenerate tests'))) ||
-      (github.event_name == 'reaction' && github.event.reaction.content == '+1' && github.event.issue.pull_request) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && 
+        (contains(github.event.comment.body, 'approve tests') || 
+         contains(github.event.comment.body, 'regenerate tests'))) ||
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
     runs-on: ubuntu-latest
     permissions:
@@ -34,9 +33,7 @@ jobs:
       - name: Check for approval type
         id: check_approval
         run: |
-          if [[ "${{ github.event_name }}" == "reaction" && "${{ github.event.reaction.content }}" == "+1" ]]; then
-            echo "action=approve" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
             echo "action=approve" >> $GITHUB_OUTPUT
           elif [[ "${{ github.event.comment.body }}" == *"approve tests"* ]]; then
             echo "action=approve" >> $GITHUB_OUTPUT
@@ -105,52 +102,41 @@ jobs:
               body: body
             });
 
-  check-bot-comment:
+  handle-bot-comment-reaction:
     if: |
-      github.event_name == 'reaction' && 
-      github.event.reaction.content == '+1'
+      github.event_name == 'issue_comment' && 
+      github.event.action == 'created' &&
+      github.event.issue.pull_request
     runs-on: ubuntu-latest
-    outputs:
-      found: ${{ steps.check_bot_comment.outputs.result }}
     steps:
-      - name: Check for test bot comment
+      - name: Check for bot comment and reaction
+        id: check_reaction
         uses: actions/github-script@v7
-        id: check_bot_comment
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
+            const { data: comment } = await github.rest.issues.getComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number
+              comment_id: context.payload.comment.id
             });
 
-            const botComment = comments.data.find(comment => 
-              comment.user.type === 'Bot' && 
-              comment.id === ${{ github.event.comment.id }} &&
-              comment.body.includes('Unit Tests Generated')
-            );
-
-            if (botComment) {
-              console.log('Found bot comment with generated tests');
+            if (comment.user.type === 'Bot' && 
+                comment.body.includes('Unit Tests Generated') &&
+                context.payload.comment.reactions && 
+                context.payload.comment.reactions['+1'] > 0) {
               return true;
             }
             return false;
 
-  apply-approved-tests:
-    needs: check-bot-comment
-    if: needs.check-bot-comment.outputs.found == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
       - name: Checkout PR code
+        if: steps.check_reaction.outputs.result == 'true'
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Apply stashed tests
+        if: steps.check_reaction.outputs.result == 'true'
         run: |
           if git stash list | grep -q "Generated tests"; then
             git stash pop
@@ -166,6 +152,7 @@ jobs:
           fi
 
       - name: Confirm application
+        if: steps.check_reaction.outputs.result == 'true'
         uses: actions/github-script@v7
         with:
           script: |
