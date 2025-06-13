@@ -75,9 +75,13 @@ jobs:
       - name: Save test suggestions
         if: steps.check_tests.outputs.generated == 'true' && steps.check_comments.outputs.exists != 'true'
         run: |
-          mkdir -p .github/test-suggestions
-          git diff --cached --name-only | xargs -I {} cp --parents {} .github/test-suggestions/
-          git stash push -m "Generated tests"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          branch_name="test-suggestions-${GITHUB_HEAD_REF}"
+          git checkout -b $branch_name
+          git add .
+          git commit -m "Add generated test suggestions"
+          git push origin $branch_name
 
       - name: Comment on PR with test suggestions
         if: steps.check_tests.outputs.generated == 'true' && steps.check_comments.outputs.exists != 'true'
@@ -86,7 +90,7 @@ jobs:
           script: |
             const { execSync } = require('child_process');
             
-            const diffOutput = execSync('git stash show -p', { encoding: 'utf8' });
+            const diffOutput = execSync('git diff origin/${GITHUB_HEAD_REF}..HEAD', { encoding: 'utf8' });
             
             const body = `🤖 **Unit Tests Generated**
 
