@@ -39,14 +39,6 @@ export class Calculator {
         return n * this.factorial(n - 1);
     }
 
-    absolute(n: number): number {
-        return Math.abs(n);
-    }
-
-    percentage(value: number, total: number): number {
-        return (value / total) * 100;
-    }
-
     round(n: number, decimals: number = 0): number {
         const factor = Math.pow(10, decimals);
         return Math.round(n * factor) / factor;
