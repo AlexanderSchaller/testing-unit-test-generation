@@ -22,13 +22,6 @@ export class Calculator {
         return Math.pow(base, exponent);
     }
 
-    squareRoot(n: number): number {
-        if (n < 0) {
-            throw new Error('Square root of negative numbers is not allowed');
-        }
-        return Math.sqrt(n);
-    }
-
     factorial(n: number): number {
         if (n < 0) {
             throw new Error('Factorial is not defined for negative numbers');
