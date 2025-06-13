@@ -46,6 +46,10 @@ jobs:
           git merge origin/test-suggestions-${{ steps.pr_info.outputs.branch }} --no-edit
           git push origin ${{ steps.pr_info.outputs.branch }}
 
+      - name: Delete test suggestions branch
+        run: |
+          git push origin --delete test-suggestions-${{ steps.pr_info.outputs.branch }}
+
       - name: Comment to confirm merge
         uses: actions/github-script@v7
         with:
