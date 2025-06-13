@@ -62,30 +62,29 @@ jobs:
           fi
 
       - name: Apply approved tests
-        if: steps.check_approval.outputs.action == 'approve' && env.suggestions_exist == 'true'
+        if: steps.check_approval.outputs.action == 'approve'
         run: |
           # Configure Git
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-
-          # Stage all changes from the suggestions branch
-          git add .
-
-          # Commit and push changes
-          git commit -m "Apply approved tests"
+            
+          # Try to fetch and merge the suggestions branch
+          suggestion_branch="test-suggestions-${GITHUB_HEAD_REF}"
+          if git fetch origin $suggestion_branch; then
+          # Merge the suggestions into the current branch
+          git merge --no-ff origin/$suggestion_branch -m "✅ Apply approved auto-generated tests
+            
+          Co-authored-by: ${{ github.event.comment.user.login || github.event.sender.login }} <${{ github.event.sender.login }}@users.noreply.github.com>"
+            
+          # Push the changes
           git push origin HEAD:${{ github.event.pull_request.head.ref || github.head_ref }}
-
-      - name: Comment when no suggestions exist
-        if: steps.check_approval.outputs.action == 'approve' && env.suggestions_exist != 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.name,
-              issue_number: context.issue.number,
-              body: 'No test suggestions were found to apply. Please regenerate tests first.'
-            })
+            
+          # Clean up the suggestions branch
+          git push origin --delete $suggestion_branch
+          else
+          echo "No test suggestions found to apply"
+          exit 1
+          fi
 
       - name: Regenerate tests
         if: steps.check_approval.outputs.action == 'regenerate'
@@ -99,23 +98,17 @@ jobs:
           else
             node .github/scripts/generate-tests.js
           fi
-
-          # Stage and check for generated tests
-          git add .
-          if git diff --cached --quiet; then
-            echo "No new tests were generated"
-            exit 0
-          fi
-
+              
           # Configure Git
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-
+              
           # Create and push to suggestions branch
           suggestion_branch="test-suggestions-${GITHUB_HEAD_REF}"
           git checkout -b $suggestion_branch
-          git commit -m "Save regenerated test suggestions"
+          git add .
+          git commit -m "💡 Save regenerated test suggestions"
           git push -f origin $suggestion_branch
-
+              
           # Create comment with suggestions
           node .github/scripts/create-test-comment.js
