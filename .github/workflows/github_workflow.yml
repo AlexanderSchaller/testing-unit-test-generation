@@ -38,7 +38,31 @@ jobs:
         run: |
           npm install --no-save typescript @typescript-eslint/parser glob openai
 
+      - name: Check for existing bot comments
+        id: check_comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.body.includes('🤖 **Unit Tests Generated**')
+            );
+
+            if (botComment) {
+              console.log('Found existing test suggestion comment');
+              core.setOutput('exists', 'true');
+            } else {
+              console.log('No existing test suggestion comment found');
+              core.setOutput('exists', 'false');
+            }
+
       - name: Generate missing tests
+        if: steps.check_comments.outputs.exists != 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -58,13 +82,13 @@ jobs:
           fi
 
       - name: Create test suggestions directory
-        if: steps.check_tests.outputs.generated == 'true'
+        if: steps.check_tests.outputs.generated == 'true' && steps.check_comments.outputs.exists != 'true'
         run: |
           mkdir -p .github/test-suggestions
           git stash push -m "Generated tests"
 
       - name: Comment on PR with test suggestions
-        if: steps.check_tests.outputs.generated == 'true'
+        if: steps.check_tests.outputs.generated == 'true' && steps.check_comments.outputs.exists != 'true'
         uses: actions/github-script@v7
         with:
           script: |
