@@ -22,6 +22,14 @@ export class Calculator {
         return Math.pow(base, exponent);
     }
 
+    round(number: number, decimals: number = 0): number {
+        if (decimals < 0) {
+            throw new Error('Number of decimal places cannot be negative');
+        }
+        const multiplier = Math.pow(10, decimals);
+        return Math.round(number * multiplier) / multiplier;
+    }
+
     factorial(n: number): number {
         if (n < 0) {
             throw new Error('Factorial is not defined for negative numbers');
